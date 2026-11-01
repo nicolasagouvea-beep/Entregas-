@@ -40,6 +40,12 @@ ol{list-style:none;margin:0;padding:0}
 .t{flex:1;min-width:0}.t b{display:block}.t span{font-size:14px;color:var(--mut)}
 .acts{display:flex;flex-direction:column;gap:4px}
 #vazio{color:var(--mut);margin:4px 0}
+.cam{display:grid;place-items:center;min-height:64px;border-radius:8px;font:600 20px Barlow,sans-serif;cursor:pointer}
+.dica{font-size:13px;color:var(--mut);margin:6px 0 0}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.chip{display:inline-block;font-size:13px;font-weight:600;padding:2px 8px;border-radius:99px;background:var(--bg);margin:4px 6px 0 0;color:var(--ink)}
+.chip.cob{background:var(--amber);color:var(--on-amber)}
+.stop.next{background:color-mix(in srgb,var(--amber) 16%,transparent);border-radius:8px;padding-left:6px;padding-right:6px}
 .kpis{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:14px}
 .kpi{border:1px solid var(--line);border-radius:8px;padding:10px}
 .kpi b{display:block;font:700 28px/1.1 'Barlow Condensed',sans-serif}
@@ -56,20 +62,27 @@ ol{list-style:none;margin:0;padding:0}
     <summary>Chave do Google Maps</summary>
     <p style="font-size:14px;color:var(--mut)">Ative no Google Cloud: Maps JavaScript API, Geocoding API e Directions API. Cole a chave abaixo.</p>
     <input id="key" placeholder="Chave de API" autocomplete="off">
+    <label for="cidade">Cidade padrão (usada quando a comanda não traz)</label>
+    <input id="cidade">
     <button class="pri gap" id="saveKey">Salvar e carregar mapa</button>
   </details>
 
   <section class="card">
-    <h2>Ler cupom</h2>
-    <input id="foto" type="file" accept="image/*" capture="environment">
-    <button class="pri gap" id="ler">Ler endereço do cupom</button>
-    <label for="nome">Cliente (opcional)</label>
-    <input id="nome">
-    <label for="valor">Valor da entrega em R$ (opcional)</label>
-    <input id="valor" inputmode="decimal" placeholder="0,00">
+    <h2>Nova entrega</h2>
+    <label class="cam pri">Fotografar comanda<input id="foto" type="file" accept="image/*" capture="environment" hidden></label>
+    <p class="dica">Fotografe a comanda inteira, reta e sem reflexo. A leitura começa sozinha.</p>
+    <div class="row2">
+      <div><label for="nome">Cliente</label><input id="nome"></div>
+      <div><label for="tel">Telefone</label><input id="tel" inputmode="tel"></div>
+    </div>
     <label for="end">Endereço</label>
     <textarea id="end" rows="2" placeholder="Rua, número, bairro, cidade"></textarea>
-    <button class="sec gap" id="add">Adicionar entrega</button>
+    <div class="row2">
+      <div><label for="valor">Taxa de entrega (R$)</label><input id="valor" inputmode="decimal" placeholder="0,00"></div>
+      <div><label for="cobrar">Cobrar do cliente (R$)</label><input id="cobrar" inputmode="decimal" placeholder="0,00"></div>
+    </div>
+    <input id="pedido" type="hidden">
+    <button class="pri gap" id="add">Adicionar entrega</button>
     <div id="msg" role="status"></div>
   </section>
 
@@ -141,40 +154,45 @@ function initMap(){
 }
 
 /* ---------- Leitura do cupom (OCR) ---------- */
+const num = v => parseFloat((v || '').replace(',', '.')) || 0;
+
 function extrair(t){
-  const L = t.split('\n').map(x => x.trim()).filter(Boolean);
-  const via = /\b(rua|r\.|av\.?|avenida|travessa|tv\.|alameda|al\.|estrada|rodovia|pra[cç]a|largo)\s/i;
-  const extra = /\d{5}-?\d{3}|bairro|\b[A-Za-zÀ-ú ]+\s*[-\/]\s*[A-Z]{2}\b/i;
-  const i = L.findIndex(l => via.test(l));
-  let end = i >= 0 ? L[i] : '';
-  if(i >= 0){
-    for(let j = i + 1; j <= i + 2 && j < L.length; j++){
-      if(extra.test(L[j]) && L[j].length < 70) end += ', ' + L[j];
-    }
-  }
-  const cep = t.match(/\d{5}-?\d{3}/);
-  if(cep && !end.includes(cep[0])) end += (end ? ', ' : '') + cep[0];
-  const c = t.match(/(?:cliente|nome)\s*[:\-]?\s*(.+)/i);
-  return {end: end.replace(/\s+/g, ' '), nome: c ? c[1].trim() : ''};
+  const i = t.search(/Informa[cç][oõ]es\s+para\s+Entrega/i);
+  const bloco = (i >= 0 ? t.slice(i) : t).replace(/\s+/g, ' ').trim();
+  const pega = re => { const m = bloco.match(re); return m ? m[1].trim() : ''; };
+  const nome = pega(/Cliente\s*:\s*(.+?)(?=\s*Telefone\s*:|\s*Endere[cç]o\s*:|$)/i);
+  const tel = pega(/Telefone\s*:\s*(.+?)(?=\s*Endere[cç]o\s*:|$)/i).replace(/[^\d()\s-]/g, '').trim();
+  let end = pega(/Endere[cç]o\s*:\s*(.+?)(?=\s*N[AÃ]O\s*[EÉ]\s*DOCUMENTO|$)/i);
+  end = end.replace(/^R\.\s*/i, 'Rua ').replace(/^Av\.\s*/i, 'Avenida ')
+           .replace(/N[º°]\s*(?=\d)/gi, '').replace(/\s+-\s+/g, ', ');
+  const cidade = $('cidade').value.trim();
+  if(end && cidade && !end.toLowerCase().includes(cidade.split('-')[0].trim().toLowerCase())) end += ', ' + cidade;
+  const din = re => { const m = t.match(re); return m ? parseFloat(m[1].replace(/\./g, '').replace(',', '.')) : 0; };
+  const taxa = din(/Entrega[^\n]{0,60}?R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})/i);
+  const total = din(/A\s*Pagar[^\n]{0,40}?R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})/i);
+  const cobrar = /Pagar\s+na\s+entrega/i.test(t) ? total : 0;
+  const pedido = (t.match(/Pedido\s*:\s*(\d+)/i) || [])[1] || '';
+  return {nome, tel, end, taxa, cobrar, pedido};
 }
 
-$('ler').onclick = async () => {
+const fmt = v => v ? String(v).replace('.', ',') : '';
+
+$('foto').onchange = async () => {
   const f = $('foto').files[0];
-  if(!f) return msg('Escolha ou tire uma foto do cupom.', true);
+  if(!f) return;
   if(!window.Tesseract) return msg('O leitor de texto não carregou. Verifique a internet.', true);
-  $('ler').disabled = true; msg('Lendo cupom…');
+  msg('Lendo comanda…');
   try{
     const r = await Tesseract.recognize(f, 'por', {logger: m => {
-      if(m.status === 'recognizing text') msg('Lendo cupom… ' + Math.round(m.progress * 100) + '%');
+      if(m.status === 'recognizing text') msg('Lendo comanda… ' + Math.round(m.progress * 100) + '%');
     }});
     const x = extrair(r.data.text);
-    $('end').value = x.end || r.data.text.trim();
-    if(x.nome) $('nome').value = x.nome;
-    msg(x.end ? 'Endereço encontrado. Confira antes de adicionar.' : 'Não achei um endereço claro. Edite o texto abaixo.', !x.end);
+    $('nome').value = x.nome; $('tel').value = x.tel; $('end').value = x.end;
+    $('valor').value = fmt(x.taxa); $('cobrar').value = fmt(x.cobrar); $('pedido').value = x.pedido;
+    msg(x.end ? 'Comanda lida. Confira os dados e toque em Adicionar.' : 'Não achei o endereço. Tente outra foto ou digite.', !x.end);
   } catch(e){
     msg('Falha ao ler a imagem. Tente uma foto mais nítida.', true);
   }
-  $('ler').disabled = false;
 };
 
 /* ---------- Entregas ---------- */
@@ -186,9 +204,9 @@ $('add').onclick = () => {
   geo.geocode({address: a, region: 'br'}, (res, st) => {
     if(st !== 'OK') return msg('Endereço não encontrado (' + st + '). Inclua bairro e cidade.', true);
     const l = res[0].geometry.location;
-    stops.push({id: Date.now(), nome: $('nome').value.trim(), end: res[0].formatted_address, lat: l.lat(), lng: l.lng(), feito: false, valor: parseFloat(($('valor').value || '').replace(',', '.')) || 0});
+    stops.push({id: Date.now(), nome: $('nome').value.trim(), end: res[0].formatted_address, lat: l.lat(), lng: l.lng(), feito: false, valor: num($('valor').value), cobrar: num($('cobrar').value), tel: $('tel').value.trim(), pedido: $('pedido').value});
     save(); render();
-    $('end').value = ''; $('nome').value = ''; $('valor').value = ''; $('foto').value = '';
+    ['nome','tel','end','valor','cobrar','pedido','foto'].forEach(id => $(id).value = '');
     msg('Entrega adicionada.');
   });
 };
@@ -211,15 +229,24 @@ function render(){
   const pend = stops.filter(s => !s.feito).length;
   $('cnt').textContent = stops.length ? pend + ' pendentes' : '';
   $('vazio').hidden = stops.length > 0;
+  const prox = stops.findIndex(s => !s.feito);
   stops.forEach((s, i) => {
     const li = document.createElement('li');
-    li.className = 'stop' + (s.feito ? ' done' : '');
+    li.className = 'stop' + (s.feito ? ' done' : '') + (i === prox ? ' next' : '');
     li.innerHTML = '<div class="n"></div><div class="t"><b></b><span></span></div><div class="acts"></div>';
     li.querySelector('.n').textContent = i + 1;
-    li.querySelector('b').textContent = s.nome || 'Entrega ' + (i + 1);
+    li.querySelector('b').textContent = (s.pedido ? '#' + s.pedido + ' · ' : '') + (s.nome || 'Entrega ' + (i + 1));
     li.querySelector('span').textContent = s.end;
+    const tx = li.querySelector('.t');
+    const chip = (txt, cls) => { const c = document.createElement('div'); c.className = 'chip ' + (cls || ''); c.textContent = txt; tx.appendChild(c); };
+    if(i === prox) chip('Próxima');
+    if(s.cobrar) chip('Cobrar ' + brl(s.cobrar), 'cob');
+    if(s.valor) chip('Taxa ' + brl(s.valor));
     const acts = li.querySelector('.acts');
     acts.appendChild(btn(s.feito ? 'Reabrir' : 'Entregue', () => toggle(s)));
+    if(s.tel){ const a = document.createElement('a'); a.className = 'btn mini'; a.textContent = 'Ligar'; a.href = 'tel:' + s.tel.replace(/[^\d+]/g, ''); acts.appendChild(a); }
+    { const a = document.createElement('a'); a.className = 'btn mini'; a.textContent = 'Navegar'; a.target = '_blank'; a.rel = 'noopener';
+      a.href = 'https://www.google.com/maps/dir/?api=1&travelmode=two-wheeler&destination=' + s.lat + ',' + s.lng; acts.appendChild(a); }
     acts.appendChild(btn('Remover', () => { stops = stops.filter(x => x.id !== s.id); save(); render(); }));
     ol.appendChild(li);
   });
@@ -366,6 +393,8 @@ $('saveKey').onclick = () => {
 };
 const k0 = store.get('key', '');
 $('key').value = k0;
+$('cidade').value = store.get('cidade', 'Curitiba - PR');
+$('cidade').onchange = () => store.set('cidade', $('cidade').value.trim());
 render();
 loadMaps(k0);
 </script>
