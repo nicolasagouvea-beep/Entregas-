@@ -177,15 +177,49 @@ function extrair(t){
 
 const fmt = v => v ? String(v).replace('.', ',') : '';
 
+let worker;
+async function getWorker(){
+  if(!worker) worker = await Tesseract.createWorker('por', 1, {logger: m => {
+    if(m.status === 'recognizing text') msg('Lendo comanda… ' + Math.round(m.progress * 100) + '%');
+  }});
+  await worker.setParameters({tessedit_pageseg_mode: '6', preserve_interword_spaces: '1'});
+  return worker;
+}
+
+async function preparar(file){
+  const bmp = await createImageBitmap(file, {imageOrientation: 'from-image'});
+  const esc = Math.min(1, 2000 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(bmp.width * esc); c.height = Math.round(bmp.height * esc);
+  const g = c.getContext('2d');
+  g.drawImage(bmp, 0, 0, c.width, c.height);
+  const d = g.getImageData(0, 0, c.width, c.height), p = d.data, h = new Array(256).fill(0);
+  for(let i = 0; i < p.length; i += 4){
+    const v = Math.round(.299 * p[i] + .587 * p[i + 1] + .114 * p[i + 2]);
+    p[i] = v; h[v]++;
+  }
+  const tot = p.length / 4; let a = 0, lo = 0, hi = 255;
+  for(let v = 0; v < 256; v++){ a += h[v]; if(a > tot * .02){ lo = v; break; } }
+  a = 0;
+  for(let v = 255; v >= 0; v--){ a += h[v]; if(a > tot * .02){ hi = v; break; } }
+  const k = 255 / Math.max(1, hi - lo);
+  for(let i = 0; i < p.length; i += 4){
+    const v = Math.max(0, Math.min(255, (p[i] - lo) * k));
+    p[i] = p[i + 1] = p[i + 2] = v;
+  }
+  g.putImageData(d, 0, 0);
+  return c;
+}
+
 $('foto').onchange = async () => {
   const f = $('foto').files[0];
   if(!f) return;
   if(!window.Tesseract) return msg('O leitor de texto não carregou. Verifique a internet.', true);
   msg('Lendo comanda…');
   try{
-    const r = await Tesseract.recognize(f, 'por', {logger: m => {
-      if(m.status === 'recognizing text') msg('Lendo comanda… ' + Math.round(m.progress * 100) + '%');
-    }});
+    msg('Preparando leitor…');
+    const w = await getWorker();
+    const r = await w.recognize(await preparar(f));
     const x = extrair(r.data.text);
     $('nome').value = x.nome; $('tel').value = x.tel; $('end').value = x.end;
     $('valor').value = fmt(x.taxa); $('cobrar').value = fmt(x.cobrar); $('pedido').value = x.pedido;
@@ -397,6 +431,7 @@ $('cidade').value = store.get('cidade', 'Curitiba - PR');
 $('cidade').onchange = () => store.set('cidade', $('cidade').value.trim());
 render();
 loadMaps(k0);
+window.addEventListener('load', () => { if(window.Tesseract) getWorker().catch(() => {}); });
 </script>
 </body>
 </html>
