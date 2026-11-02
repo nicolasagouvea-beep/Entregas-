@@ -13,8 +13,8 @@
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{font:16px/1.4 Barlow,system-ui,sans-serif;background:var(--bg);color:var(--ink);display:flex;flex-direction:column}
-#map{flex:0 0 42vh;background:#cfd6dc}
-main{flex:1;overflow:auto;padding:14px 14px calc(14px + env(safe-area-inset-bottom))}
+main{flex:1;overflow:auto;padding:calc(14px + env(safe-area-inset-top)) 14px calc(14px + env(safe-area-inset-bottom))}
+.resumo{font:600 18px 'Barlow Condensed',sans-serif;margin:0 0 8px}
 h2{font:700 22px 'Barlow Condensed',sans-serif;margin:0 0 8px}
 h2 small{font:500 15px Barlow,sans-serif;color:var(--mut)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
@@ -56,12 +56,13 @@ ol{list-style:none;margin:0;padding:0}
 </style>
 </head>
 <body>
-<div id="map" aria-label="Mapa"></div>
 <main>
   <details class="card" id="cfg">
     <summary>Chave do Google Maps</summary>
     <p style="font-size:14px;color:var(--mut)">Ative no Google Cloud: Maps JavaScript API, Geocoding API e Directions API. Cole a chave abaixo.</p>
     <input id="key" placeholder="Chave de API" autocomplete="off">
+    <label for="gkey">Chave do Gemini (IA, opcional)</label>
+    <input id="gkey" placeholder="Chave de API do Gemini" autocomplete="off">
     <label for="cidade">Cidade padrão (usada quando a comanda não traz)</label>
     <input id="cidade">
     <button class="pri gap" id="saveKey">Salvar e carregar mapa</button>
@@ -88,6 +89,7 @@ ol{list-style:none;margin:0;padding:0}
 
   <section class="card">
     <h2>Entregas <small id="cnt"></small></h2>
+    <p class="resumo" id="resumo"></p>
     <ol id="lista"></ol>
     <p id="vazio">Nenhuma entrega ainda. Fotografe um cupom para começar.</p>
     <div class="row">
@@ -120,7 +122,20 @@ function save(){ store.set('stops', stops); store.set('hist', hist); }
 function loadMaps(k){
   if(!k){ $('cfg').open = true; return; }
   window.initMap = initMap;
-  window.gm_authFailure = () => msg('Chave do Google Maps recusada. Confira a chave e as APIs ativadas.', true);
+  const dicas = {
+    RefererNotAllowedMapError: 'o endereço do site não está autorizado na chave',
+    ApiNotActivatedMapError: 'ative a Maps JavaScript API no projeto',
+    BillingNotEnabledMapError: 'ative o faturamento do projeto',
+    InvalidKeyMapError: 'chave inválida, confira se colou a chave do Maps',
+    ApiTargetBlockedMapError: 'a chave não permite a Maps JavaScript API'
+  };
+  const ce = console.error;
+  console.error = (...a) => {
+    const m = a.join(' ').match(/(\w+MapError)/);
+    if(m){ window.gmErro = true; msg('Erro do Google Maps: ' + m[1] + (dicas[m[1]] ? ' (' + dicas[m[1]] + ')' : ''), true); }
+    ce.apply(console, a);
+  };
+  window.gm_authFailure = () => { if(!window.gmErro) msg('Chave do Google Maps recusada. Confira a chave e as APIs ativadas.', true); };
   const s = document.createElement('script');
   s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(k) + '&callback=initMap';
   s.onerror = () => msg('Não foi possível carregar o Google Maps.', true);
@@ -128,25 +143,11 @@ function loadMaps(k){
 }
 
 function initMap(){
-  map = new google.maps.Map($('map'), {
-    center: {lat: -23.55, lng: -46.63}, zoom: 12,
-    disableDefaultUI: true, zoomControl: true, clickableIcons: false
-  });
   geo = new google.maps.Geocoder();
   dirs = new google.maps.DirectionsService();
-  rend = new google.maps.DirectionsRenderer({
-    map, suppressMarkers: true,
-    polylineOptions: {strokeColor: '#ffb400', strokeWeight: 6}
-  });
   if(navigator.geolocation){
     navigator.geolocation.watchPosition(p => {
       pos = {lat: p.coords.latitude, lng: p.coords.longitude};
-      if(!me){
-        me = new google.maps.Marker({map, position: pos, icon: {
-          path: google.maps.SymbolPath.CIRCLE, scale: 8, fillColor: '#1a73e8',
-          fillOpacity: 1, strokeColor: '#fff', strokeWeight: 3}});
-        map.setCenter(pos);
-      } else me.setPosition(pos);
       link();
     }, () => {}, {enableHighAccuracy: true});
   }
@@ -176,6 +177,32 @@ function extrair(t){
 }
 
 const fmt = v => v ? String(v).replace('.', ',') : '';
+
+async function lerComIA(f){
+  const bmp = await createImageBitmap(f, {imageOrientation: 'from-image'});
+  const esc = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(bmp.width * esc); c.height = Math.round(bmp.height * esc);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  const b64 = c.toDataURL('image/jpeg', .85).split(',')[1];
+  const prompt = 'Esta é uma comanda de entrega de restaurante. Leia SOMENTE o bloco "Informações para Entrega" para cliente, telefone e endereço; o endereço do cabeçalho é do restaurante e deve ser ignorado. Responda em JSON com as chaves: cliente, telefone, endereco (rua, número e bairro, sem a cidade), taxa_entrega (número da linha "Entrega R$"), total_a_pagar (número da linha "A Pagar"), pagar_na_entrega (true se houver "Pagar na entrega"), pedido (número do pedido). Use null para o que não encontrar.';
+  const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'x-goog-api-key': store.get('gkey', '')},
+    body: JSON.stringify({
+      contents: [{parts: [{inline_data: {mime_type: 'image/jpeg', data: b64}}, {text: prompt}]}],
+      generationConfig: {responseMimeType: 'application/json', temperature: 0}
+    })
+  });
+  if(!r.ok) throw new Error('IA ' + r.status);
+  const j = await r.json();
+  const o = JSON.parse(j.candidates[0].content.parts[0].text);
+  const cidade = $('cidade').value.trim();
+  let end = (o.endereco || '').replace(/N[º°]\s*(?=\d)/gi, '').replace(/\s+-\s+/g, ', ');
+  if(end && cidade && !end.toLowerCase().includes(cidade.split('-')[0].trim().toLowerCase())) end += ', ' + cidade;
+  return {nome: o.cliente || '', tel: o.telefone || '', end, taxa: +o.taxa_entrega || 0,
+          cobrar: o.pagar_na_entrega ? (+o.total_a_pagar || 0) : 0, pedido: String(o.pedido || '')};
+}
 
 let worker;
 async function getWorker(){
@@ -217,10 +244,17 @@ $('foto').onchange = async () => {
   if(!window.Tesseract) return msg('O leitor de texto não carregou. Verifique a internet.', true);
   msg('Lendo comanda…');
   try{
-    msg('Preparando leitor…');
-    const w = await getWorker();
-    const r = await w.recognize(await preparar(f));
-    const x = extrair(r.data.text);
+    let x = null;
+    if(store.get('gkey', '')){
+      try{ msg('Lendo com IA…'); x = await lerComIA(f); }
+      catch(e){ msg('IA indisponível, usando o leitor local…'); }
+    }
+    if(!x){
+      msg('Preparando leitor…');
+      const w = await getWorker();
+      const r = await w.recognize(await preparar(f));
+      x = extrair(r.data.text);
+    }
     $('nome').value = x.nome; $('tel').value = x.tel; $('end').value = x.end;
     $('valor').value = fmt(x.taxa); $('cobrar').value = fmt(x.cobrar); $('pedido').value = x.pedido;
     msg(x.end ? 'Comanda lida. Confira os dados e toque em Adicionar.' : 'Não achei o endereço. Tente outra foto ou digite.', !x.end);
@@ -236,6 +270,7 @@ $('add').onclick = () => {
   if(!geo) return msg('Carregue o mapa primeiro com a chave do Google Maps.', true);
   msg('Localizando endereço…');
   geo.geocode({address: a, region: 'br'}, (res, st) => {
+    if(st === 'REQUEST_DENIED') return msg('O Google recusou a chave. Confira a chave, o faturamento e as APIs ativadas.', true);
     if(st !== 'OK') return msg('Endereço não encontrado (' + st + '). Inclua bairro e cidade.', true);
     const l = res[0].geometry.location;
     stops.push({id: Date.now(), nome: $('nome').value.trim(), end: res[0].formatted_address, lat: l.lat(), lng: l.lng(), feito: false, valor: num($('valor').value), cobrar: num($('cobrar').value), tel: $('tel').value.trim(), pedido: $('pedido').value});
@@ -247,7 +282,7 @@ $('add').onclick = () => {
 
 function toggle(s){
   s.feito = !s.feito;
-  if(s.feito) hist.push({id: s.id, nome: s.nome, end: s.end, lat: s.lat, lng: s.lng, valor: s.valor || 0, ts: Date.now()});
+  if(s.feito) hist.push({id: s.id, nome: s.nome, end: s.end, lat: s.lat, lng: s.lng, valor: s.valor || 0, km: s.km || 0, ts: Date.now()});
   else hist = hist.filter(h => h.id !== s.id);
   save(); render();
 }
@@ -263,12 +298,17 @@ function render(){
   const pend = stops.filter(s => !s.feito).length;
   $('cnt').textContent = stops.length ? pend + ' pendentes' : '';
   $('vazio').hidden = stops.length > 0;
-  const prox = stops.findIndex(s => !s.feito);
-  stops.forEach((s, i) => {
+  const comKm = stops.filter(s => !s.feito && s.km), rm = $('resumo');
+  if(pend && comKm.length){
+    const k = comKm.reduce((t, x) => t + x.km, 0), m = comKm.reduce((t, x) => t + (x.min || 0), 0);
+    rm.textContent = 'Faltam ' + k.toFixed(1).replace('.', ',') + ' km · ' + m + ' min' + (comKm.length < pend ? ' (trace a rota de novo para incluir as novas)' : '');
+  } else rm.textContent = pend ? 'Toque em "Traçar melhor rota" para ver km e tempo.' : '';
+  const prox = stops.some(s => !s.feito) ? 0 : -1;
+  stops.filter(s => !s.feito).concat(stops.filter(s => s.feito)).forEach((s, i) => {
     const li = document.createElement('li');
     li.className = 'stop' + (s.feito ? ' done' : '') + (i === prox ? ' next' : '');
     li.innerHTML = '<div class="n"></div><div class="t"><b></b><span></span></div><div class="acts"></div>';
-    li.querySelector('.n').textContent = i + 1;
+    li.querySelector('.n').textContent = s.feito ? '✓' : i + 1;
     li.querySelector('b').textContent = (s.pedido ? '#' + s.pedido + ' · ' : '') + (s.nome || 'Entrega ' + (i + 1));
     li.querySelector('span').textContent = s.end;
     const tx = li.querySelector('.t');
@@ -276,6 +316,7 @@ function render(){
     if(i === prox) chip('Próxima');
     if(s.cobrar) chip('Cobrar ' + brl(s.cobrar), 'cob');
     if(s.valor) chip('Taxa ' + brl(s.valor));
+    if(s.km && !s.feito) chip(s.km.toFixed(1).replace('.', ',') + ' km · ' + s.min + ' min');
     const acts = li.querySelector('.acts');
     acts.appendChild(btn(s.feito ? 'Reabrir' : 'Entregue', () => toggle(s)));
     if(s.tel){ const a = document.createElement('a'); a.className = 'btn mini'; a.textContent = 'Ligar'; a.href = 'tel:' + s.tel.replace(/[^\d+]/g, ''); acts.appendChild(a); }
@@ -284,16 +325,6 @@ function render(){
     acts.appendChild(btn('Remover', () => { stops = stops.filter(x => x.id !== s.id); save(); render(); }));
     ol.appendChild(li);
   });
-  if(map){
-    marks.forEach(m => m.setMap(null)); marks = [];
-    const bd = new google.maps.LatLngBounds();
-    stops.forEach((s, i) => {
-      marks.push(new google.maps.Marker({map, position: {lat: s.lat, lng: s.lng},
-        label: {text: String(i + 1), fontWeight: '700'}, opacity: s.feito ? .5 : 1}));
-      bd.extend({lat: s.lat, lng: s.lng});
-    });
-    if(stops.length) map.fitBounds(bd, 60);
-  }
   link();
   analises();
 }
@@ -314,13 +345,13 @@ function analises(){
   const dHoje = h.filter(x => dia(x.ts) === hoje);
   const sem = h.filter(x => dia(x.ts) > hoje - 7 * DAY);
   const soma = a => a.reduce((t, x) => t + (x.valor || 0), 0);
-  const ints = []; let dist = 0;
+  const ints = [];
   for(let i = 1; i < h.length; i++){
     if(dia(h[i].ts) !== dia(h[i - 1].ts)) continue;
     const dt = h[i].ts - h[i - 1].ts;
     if(dt < 3 * 3600e3) ints.push(dt);
-    if(dia(h[i].ts) === hoje) dist += km(h[i - 1], h[i]);
   }
+  const dist = dHoje.reduce((t, x) => t + (x.km || 0), 0);
   const med = ints.length ? Math.round(ints.reduce((a, b) => a + b, 0) / ints.length / 60000) + ' min' : '–';
   $('tot').textContent = h.length ? h.length + ' no total' : '';
   const k = [
@@ -329,7 +360,7 @@ function analises(){
     ['Ganho hoje', brl(soma(dHoje))],
     ['Ganho em 7 dias', brl(soma(sem))],
     ['Tempo médio entre entregas', med],
-    ['Distância hoje (linha reta)', dist.toFixed(1).replace('.', ',') + ' km']
+    ['Distância hoje', dist.toFixed(1).replace('.', ',') + ' km']
   ];
   const box = $('kpis'); box.innerHTML = '';
   k.forEach(([l, v]) => {
@@ -357,14 +388,15 @@ function analises(){
 $('exportar').onclick = () => {
   if(!hist.length) return msg('Ainda não há entregas concluídas para exportar.', true);
   const q = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-  const linhas = [['Data', 'Hora', 'Cliente', 'Endereço', 'Valor (R$)'].map(q).join(';')];
+  const linhas = [['Data', 'Hora', 'Cliente', 'Endereço', 'Valor (R$)', 'Km'].map(q).join(';')];
   hist.slice().sort((a, b) => a.ts - b.ts).forEach(x => {
     const d = new Date(x.ts);
     linhas.push([
       d.toLocaleDateString('pt-BR'),
       d.toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'}),
       x.nome || '', x.end || '',
-      (x.valor || 0).toFixed(2).replace('.', ',')
+      (x.valor || 0).toFixed(2).replace('.', ','),
+      (x.km || 0).toFixed(1).replace('.', ',')
     ].map(q).join(';'));
   });
   const blob = new Blob(['\ufeff' + linhas.join('\r\n')], {type: 'text/csv;charset=utf-8'});
@@ -398,12 +430,12 @@ $('rota').onclick = () => {
     optimizeWaypoints: true, travelMode: 'DRIVING'
   }, (r, st) => {
     if(st !== 'OK') return msg('Não consegui traçar a rota (' + st + ').', true);
-    rend.setDirections(r);
     const ordem = r.routes[0].waypoint_order.map(i => mid[i]).concat(dest);
+    r.routes[0].legs.forEach((l, k) => { ordem[k].km = l.distance.value / 1000; ordem[k].min = Math.round(l.duration.value / 60); });
     stops = ordem.concat(stops.filter(s => s.feito));
     save(); render();
-    rend.setDirections(r);
-    msg('Rota pronta. Siga a ordem numerada.');
+    const k = ordem.reduce((t, x) => t + x.km, 0), m = ordem.reduce((t, x) => t + x.min, 0);
+    msg('Rota pronta: ' + k.toFixed(1).replace('.', ',') + ' km · ' + m + ' min.');
   });
 };
 
@@ -423,15 +455,16 @@ function link(){
 $('saveKey').onclick = () => {
   const k = $('key').value.trim();
   if(!k) return msg('Cole a chave de API.', true);
-  store.set('key', k); location.reload();
+  store.set('key', k); store.set('gkey', $('gkey').value.trim()); location.reload();
 };
 const k0 = store.get('key', '');
 $('key').value = k0;
+$('gkey').value = store.get('gkey', '');
 $('cidade').value = store.get('cidade', 'Curitiba - PR');
 $('cidade').onchange = () => store.set('cidade', $('cidade').value.trim());
 render();
 loadMaps(k0);
-window.addEventListener('load', () => { if(window.Tesseract) getWorker().catch(() => {}); });
+window.addEventListener('load', () => { if(window.Tesseract && !store.get('gkey', '')) getWorker().catch(() => {}); });
 </script>
 </body>
 </html>
